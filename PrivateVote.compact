@@ -1,0 +1,103 @@
+// Contract: PrivateVote.compact
+// Goal: Building a secure, anonymous voting app for the hackathon using ZK Nullifiers.
+
+// This is the entire set of rules and data for our election.
+contract PrivateVote {
+
+    // ---
+    // 1. PUBLIC LEDGER STATE (The Tally) - What everyone can see and verify.
+    // ---
+    state {
+        // This is the public leaderboard: Candidate name maps to total votes.
+        vote_counts: Map<string, u64>;
+        
+        // This is the ZK secret sauce! We store anonymous proof that a voter has 
+        // already spent their secret ID. This prevents anyone from voting twice.
+        nullifiers: Set<Field>; 
+    }
+
+    // ---
+    // 2. INITIALIZATION (Election Setup) - The admin runs this once.
+    // ---
+
+    // Public input to set up the candidates for the election.
+    input InitializeElection {
+        candidates: Vector<string>; // Just a list of names we need to track.
+    }
+
+    // The function that runs to set the initial state.
+    transition InitializeElection(input: InitializeElection) {
+        // Start the public maps fresh.
+        next.vote_counts = Map<string, u64>::new();
+        next.nullifiers = Set<Field>::new();
+
+        // Loop through the list and start every candidate at zero votes.
+        for let candidate in input.candidates {
+            next.vote_counts[candidate] = 0;
+        }
+        
+        // TODO: In a production version, we'd need another ZK proof here
+        // to make sure only the election organizer (Admin) can run this!
+    }
+
+    // ---
+    // 3. VOTE SUBMISSION: INPUT & WITNESS - The voter's action.
+    // ---
+
+    // This part is public: which candidate the vote is for.
+    input SubmitVote {
+        candidate_name: string; 
+    }
+
+    // This is the SECRET part (the WITNESS). It stays on the user's computer.
+    witness VoteDetails {
+        // This is the voter's one-time, secret eligibility token.
+        voter_id_secret: u64; 
+        
+        // This is the unique, anonymous hash created from the secret ID. 
+        // We put this on the ledger, NOT the ID, to prove uniqueness privately.
+        nullifier_hash: Field; 
+    }
+
+    // ---
+    // 4. CIRCUIT LOGIC (The ZK Proof Check) - This is the trustless verification layer.
+    // ---
+    circuit IsVoteValid(
+        input: SubmitVote,
+        witness: VoteDetails,
+        prev_state: state
+    ): bool {
+        // CHECK 1: Basic validation - prove the user actually knows a secret ID.
+        assert(witness.voter_id_secret != 0, "Secret ID can't be zero - must be legit.");
+
+        // CHECK 2: THE NULLIFIER CHECK! This is how we stop double-voting.
+        // We check the public list (nullifiers) to see if this anonymous receipt 
+        // has been used before. If it has, the assertion fails and the vote is rejected.
+        assert(!prev_state.nullifiers.contains(witness.nullifier_hash), 
+               "Nope! This secret has already been spent. No double votes!");
+        
+        // CHECK 3: Make sure the candidate they chose is real and in the election list. 
+        return prev_state.vote_counts.contains_key(input.candidate_name);
+    }
+
+
+    // ---
+    // 5. TRANSITION LOGIC (The State Change) - Runs only if the ZK proof is valid.
+    // ---
+
+    // This function executes the vote.
+    transition SubmitVote(input: SubmitVote) 
+        // The "requires" keyword means the entire ZK Circuit (IsVoteValid) MUST succeed first!
+        requires IsVoteValid(input, witness, prev) 
+    {
+        next = prev; 
+
+        // ACTION 1: Record the Nullifier to prevent future votes from this ID.
+        // This is the key action that consumes the vote.
+        next.nullifiers.add(witness.nullifier_hash);
+        
+        // ACTION 2: Increment the candidate's count on the public tally.
+        let current_count: u64 = prev.vote_counts[input.candidate_name];
+        next.vote_counts[input.candidate_name] = current_count + 1;
+    }
+}
